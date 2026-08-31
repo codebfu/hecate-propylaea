@@ -5,9 +5,11 @@
 
 mod allowlist;
 mod artifact_cache;
+mod cli;
 mod config;
 mod crypto;
 mod forward;
+mod identity;
 mod nonce;
 mod signing;
 mod state;
@@ -24,16 +26,31 @@ use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::routing::any;
 use axum::Router;
+use clap::Parser;
 use hecate_protocol::agent::{EnrollRequest, EnrollResponse};
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 
+use crate::cli::{Cli, Commands};
 use crate::config::Config;
+use crate::identity::{forget_proxy_identity, print_forget_proxy_report, ProxyIdentityPaths};
 use crate::state::AppState;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
+
+    match Cli::parse().resolved_command() {
+        Commands::Forget => {
+            let report = forget_proxy_identity(&ProxyIdentityPaths::from_env())?;
+            print_forget_proxy_report(&report);
+            Ok(())
+        }
+        Commands::Serve => serve().await,
+    }
+}
+
+async fn serve() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

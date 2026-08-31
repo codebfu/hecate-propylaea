@@ -142,13 +142,16 @@ impl AppState {
 
     /// Remove persisted proxy identity and rotate the local signing keypair.
     pub async fn clear_proxy_identity(&self) -> Result<()> {
-        let path_id = &self.config.proxy_id_path;
-        if path_id.exists() {
-            std::fs::remove_file(path_id)?;
+        let paths = crate::identity::ProxyIdentityPaths {
+            key_path: self.config.key_path.clone(),
+            proxy_id_path: self.config.proxy_id_path.clone(),
+        };
+        let report = crate::identity::forget_proxy_identity(&paths)?;
+        if report.rotated_key {
+            let new_keypair = ProxyKeypair::load(&self.config.key_path)?;
+            self.replace_keypair(new_keypair).await;
         }
         *self.proxy_id.write().await = None;
-        let new_keypair = ProxyKeypair::regenerate_at(&self.config.key_path)?;
-        self.replace_keypair(new_keypair).await;
         self.set_forwarding(false);
         Ok(())
     }

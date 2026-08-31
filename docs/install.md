@@ -7,6 +7,23 @@
 5. In Hecate UI → **Proxies**, approve the new proxy if auto-approve is off.
 6. Clear `PROXY_ENROLLMENT_TOKEN` after enroll; identity persists under the data volume.
 
+## Forget local proxy identity
+
+To wipe the persisted proxy identity on the host (without calling the server):
+
+```bash
+docker compose stop propylaea
+docker compose run --rm propylaea forget
+```
+
+Or on a bare-metal install:
+
+```bash
+hecate-propylaea forget
+```
+
+This removes `proxy_id`, rotates `proxy.key`, and disables forwarding until a new enrollment succeeds. Revoke the proxy in the Hecate UI if it should no longer be trusted, then set a fresh `PROXY_ENROLLMENT_TOKEN` and restart.
+
 ## Re-enroll an existing proxy
 
 1. In Hecate UI → **Proxies** → open the proxy detail → **Create re-enrollment token**.
