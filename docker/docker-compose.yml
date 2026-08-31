@@ -1,0 +1,47 @@
+# Copyright (C) 2026 Gaultier HUBERT
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+services:
+  propylaea:
+    build:
+      context: ../..
+      dockerfile: hecate-propylaea/docker/Dockerfile
+    image: hecate-propylaea:local
+    environment:
+      BIND_ADDR: 0.0.0.0:8080
+      UPSTREAM_HECATE_URL: ${UPSTREAM_HECATE_URL:-http://host.docker.internal:8080}
+      API_KEY_PEPPER: ${API_KEY_PEPPER:-dev-api-key-pepper-change-me}
+      PROXY_ENROLLMENT_TOKEN: ${PROXY_ENROLLMENT_TOKEN:-}
+      PROPYLAEA_HOSTNAME: ${PROPYLAEA_HOSTNAME:-}
+      PROXY_KEY_PATH: /var/lib/hecate-propylaea/proxy.key
+      PROXY_ID_PATH: /var/lib/hecate-propylaea/proxy_id
+      SYNC_INTERVAL_SECS: ${SYNC_INTERVAL_SECS:-30}
+      HEARTBEAT_INTERVAL_SECS: ${HEARTBEAT_INTERVAL_SECS:-60}
+      RUST_LOG: ${RUST_LOG:-info}
+      INSECURE_SKIP_TLS_VERIFY: ${INSECURE_SKIP_TLS_VERIFY:-false}
+    volumes:
+      - propylaea-data:/var/lib/hecate-propylaea
+      - /etc/hostname:/etc/host_hostname:ro
+    networks:
+      - frontend
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["proxy"]
+    depends_on:
+      - propylaea
+    ports:
+      - "${PROPYLAEA_HTTPS_PORT:-18443}:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${PROPYLAEA_TLS_DIR:-./tls}:/etc/caddy/tls:ro
+    networks:
+      - frontend
+    restart: unless-stopped
+
+networks:
+  frontend:
+
+volumes:
+  propylaea-data:

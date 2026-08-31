@@ -1,0 +1,9 @@
+# Copyright (C) 2026 Gaultier HUBERT
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# HTTPS only. Port 80 is intentionally not published (see docker-compose.yml).
+:443 {
+	tls /etc/caddy/tls/cert.pem /etc/caddy/tls/key.pem
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	reverse_proxy propylaea:8080
+}

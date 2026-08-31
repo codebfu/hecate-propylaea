@@ -1,0 +1,8 @@
+/target/
+/node_modules/
+/dist/
+/.cursor/
+*.swp
+.env
+.env.*
+!.env.example

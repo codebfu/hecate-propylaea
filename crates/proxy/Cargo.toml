@@ -1,0 +1,52 @@
+[package]
+name = "hecate-propylaea"
+description = "Internet-facing agent proxy for Hecate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hecate-propylaea"
+path = "src/main.rs"
+
+[features]
+default = []
+dangerous = []
+
+[dependencies]
+hecate-protocol = { workspace = true }
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "limit"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { workspace = true }
+dotenvy = "0.15"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+base64 = "0.22"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+bytes = "1"
+dashmap = "6"
+hostname = "0.4"
+futures-util = "0.3"
+tokio-util = { version = "0.7", features = ["io"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+base64 = "0.22"
+proptest = "1"
+tokio-test = "0.4"
+tempfile = "3"
