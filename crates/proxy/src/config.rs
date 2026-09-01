@@ -2,9 +2,102 @@
 //! SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::env;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+
+/// IPv4/IPv6 CIDR used to decide when `X-Forwarded-For` may be trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IpCidr {
+    pub addr: IpAddr,
+    pub prefix_len: u8,
+}
+
+impl IpCidr {
+    pub fn parse(raw: &str) -> Result<Self> {
+        let (addr_part, prefix_part) = raw
+            .split_once('/')
+            .context("CIDR must be in address/prefix form")?;
+        let addr: IpAddr = addr_part
+            .parse()
+            .with_context(|| format!("invalid CIDR address: {addr_part}"))?;
+        let prefix_len: u8 = prefix_part
+            .parse()
+            .with_context(|| format!("invalid CIDR prefix: {prefix_part}"))?;
+        let max_prefix = match addr {
+            IpAddr::V4(_) => 32,
+            IpAddr::V6(_) => 128,
+        };
+        if prefix_len > max_prefix {
+            bail!("CIDR prefix {prefix_len} exceeds max {max_prefix} for {addr}");
+        }
+        Ok(Self { addr, prefix_len })
+    }
+
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        match (self.addr, ip) {
+            (IpAddr::V4(network), IpAddr::V4(addr)) => ipv4_in_prefix(network, addr, self.prefix_len),
+            (IpAddr::V6(network), IpAddr::V6(addr)) => ipv6_in_prefix(network, addr, self.prefix_len),
+            _ => false,
+        }
+    }
+}
+
+fn ipv4_in_prefix(network: std::net::Ipv4Addr, addr: std::net::Ipv4Addr, prefix_len: u8) -> bool {
+    let network_bits = u32::from_be_bytes(network.octets());
+    let addr_bits = u32::from_be_bytes(addr.octets());
+    if prefix_len == 0 {
+        return true;
+    }
+    let mask = if prefix_len >= 32 {
+        u32::MAX
+    } else {
+        u32::MAX << (32 - prefix_len)
+    };
+    (network_bits & mask) == (addr_bits & mask)
+}
+
+fn ipv6_in_prefix(network: std::net::Ipv6Addr, addr: std::net::Ipv6Addr, prefix_len: u8) -> bool {
+    let network_bits = u128::from_be_bytes(network.octets());
+    let addr_bits = u128::from_be_bytes(addr.octets());
+    if prefix_len == 0 {
+        return true;
+    }
+    let mask = if prefix_len >= 128 {
+        u128::MAX
+    } else {
+        u128::MAX << (128 - prefix_len)
+    };
+    (network_bits & mask) == (addr_bits & mask)
+}
+
+fn default_trusted_proxy_cidrs() -> Vec<IpCidr> {
+    [
+        "127.0.0.0/8",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "::1/128",
+        "fc00::/7",
+    ]
+    .into_iter()
+    .filter_map(|raw| IpCidr::parse(raw).ok())
+    .collect()
+}
+
+fn parse_trusted_proxy_cidrs() -> Result<Vec<IpCidr>> {
+    match env::var("TRUSTED_PROXY_CIDRS") {
+        Ok(raw) if raw.trim().is_empty() => Ok(default_trusted_proxy_cidrs()),
+        Ok(raw) => raw
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(IpCidr::parse)
+            .collect(),
+        Err(_) => Ok(default_trusted_proxy_cidrs()),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -22,6 +115,8 @@ pub struct Config {
     pub cache_enabled: bool,
     pub cache_dir: PathBuf,
     pub cache_max_bytes: u64,
+    /// When the TCP peer matches one of these CIDRs, rate limiting uses `X-Forwarded-For`.
+    pub trusted_proxy_cidrs: Vec<IpCidr>,
 }
 
 impl Config {
@@ -81,6 +176,7 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(4 * 1024 * 1024 * 1024),
+            trusted_proxy_cidrs: parse_trusted_proxy_cidrs()?,
         })
     }
 }
@@ -159,5 +255,12 @@ mod tests {
         validate_upstream_hecate_url("http://host.docker.internal:8080").unwrap();
         validate_upstream_hecate_url("http://127.0.0.1:8080").unwrap();
         assert!(validate_upstream_hecate_url("http://hecate.example").is_err());
+    }
+
+    #[test]
+    fn cidr_contains_ipv4() {
+        let cidr = IpCidr::parse("172.16.0.0/12").unwrap();
+        assert!(cidr.contains("172.18.0.2".parse().unwrap()));
+        assert!(!cidr.contains("203.0.113.1".parse().unwrap()));
     }
 }

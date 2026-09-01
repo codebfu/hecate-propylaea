@@ -6,6 +6,7 @@
 mod allowlist;
 mod artifact_cache;
 mod cli;
+mod client_ip;
 mod config;
 mod crypto;
 mod forward;
@@ -144,17 +145,18 @@ async fn handle_request(
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
 
-    let peer = addr.ip().to_string();
-    if !state.check_rate_limit(&peer, allowlist::is_enroll_route(&method, &path)) {
-        return (StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response();
-    }
-
     if !state.forwarding_enabled() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "proxy not ready (awaiting enrollment/approval or sync)",
         )
             .into_response();
+    }
+
+    let client_ip =
+        client_ip::resolve_client_ip(&addr, &headers, &state.config.trusted_proxy_cidrs);
+    if !state.check_rate_limit(&client_ip, allowlist::is_enroll_route(&method, &path)) {
+        return (StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response();
     }
 
     let max_body = allowlist::max_body_bytes(&method, &path);

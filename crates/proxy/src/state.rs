@@ -43,7 +43,8 @@ pub struct AppState {
 #[derive(Debug, Clone)]
 pub struct RateWindow {
     pub window_start: Instant,
-    pub count: u32,
+    pub enroll_count: u32,
+    pub general_count: u32,
 }
 
 impl AppState {
@@ -173,8 +174,8 @@ impl AppState {
         );
     }
 
-    /// Rate-limit by real peer IP (never X-Forwarded-For).
-    pub fn check_rate_limit(&self, peer_ip: &str, enroll: bool) -> bool {
+    /// Rate-limit by client IP (from TCP peer or trusted `X-Forwarded-For`).
+    pub fn check_rate_limit(&self, client_ip: &str, enroll: bool) -> bool {
         const MAX_RATE_ENTRIES: usize = 8192;
         let limit = if enroll { 10 } else { 120 };
         let window = Duration::from_secs(60);
@@ -183,21 +184,88 @@ impl AppState {
             self.rate_limits
                 .retain(|_, w| now.duration_since(w.window_start) < window);
         }
-        if self.rate_limits.len() >= MAX_RATE_ENTRIES && !self.rate_limits.contains_key(peer_ip) {
+        if self.rate_limits.len() >= MAX_RATE_ENTRIES && !self.rate_limits.contains_key(client_ip) {
             return false;
         }
         let mut entry = self
             .rate_limits
-            .entry(peer_ip.to_string())
+            .entry(client_ip.to_string())
             .or_insert_with(|| RateWindow {
                 window_start: now,
-                count: 0,
+                enroll_count: 0,
+                general_count: 0,
             });
         if now.duration_since(entry.window_start) >= window {
             entry.window_start = now;
-            entry.count = 0;
+            entry.enroll_count = 0;
+            entry.general_count = 0;
         }
-        entry.count += 1;
-        entry.count <= limit
+        if enroll {
+            entry.enroll_count += 1;
+            entry.enroll_count <= limit
+        } else {
+            entry.general_count += 1;
+            entry.general_count <= limit
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    fn test_state() -> AppState {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("proxy.key");
+        let proxy_id_path = dir.path().join("proxy_id");
+        let cache_dir = dir.path().join("cache");
+        let config = Config {
+            bind_addr: "127.0.0.1:8080".into(),
+            upstream_hecate_url: "http://127.0.0.1:8080".into(),
+            api_key_pepper: "dev-api-key-pepper-change-me".into(),
+            key_path,
+            proxy_id_path,
+            enrollment_token: None,
+            reported_hostname: "test".into(),
+            sync_interval_secs: 30,
+            heartbeat_interval_secs: 60,
+            insecure_skip_tls_verify: false,
+            cache_enabled: false,
+            cache_dir,
+            cache_max_bytes: 1024,
+            trusted_proxy_cidrs: vec![],
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(AppState::new(config))
+            .unwrap()
+    }
+
+    #[test]
+    fn enroll_and_general_limits_are_independent() {
+        let state = test_state();
+        let client = "203.0.113.10";
+
+        for _ in 0..120 {
+            assert!(state.check_rate_limit(client, false));
+        }
+        assert!(!state.check_rate_limit(client, false));
+
+        assert!(state.check_rate_limit(client, true));
+    }
+
+    #[test]
+    fn enroll_limit_is_enforced_separately() {
+        let state = test_state();
+        let client = "198.51.100.4";
+
+        for _ in 0..10 {
+            assert!(state.check_rate_limit(client, true));
+        }
+        assert!(!state.check_rate_limit(client, true));
+        assert!(state.check_rate_limit(client, false));
     }
 }
