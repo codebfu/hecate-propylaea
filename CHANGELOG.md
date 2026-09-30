@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Three independent per-IP rate-limit quotas: enroll (10/min), allowed (120/min), unrecognized (30/min).
+- Report limited client IPs on heartbeat; apply operator unbans from proxy sync.
+
 ## 1.0.1 — 2026-09-01
 
 ### Fixed

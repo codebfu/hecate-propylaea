@@ -68,6 +68,47 @@ pub fn is_enroll_route(method: &Method, path: &str) -> bool {
     method == Method::POST && path == "/api/v1/agent/enroll"
 }
 
+/// Rate-limit bucket for a request (independent per client IP).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RateLimitClass {
+    Enroll,
+    Allowed,
+    Unrecognized,
+}
+
+impl RateLimitClass {
+    pub fn limit(self) -> u32 {
+        match self {
+            Self::Enroll => 10,
+            Self::Allowed => 120,
+            Self::Unrecognized => 30,
+        }
+    }
+
+    pub fn as_protocol(self) -> hecate_protocol::proxy::ProxyRateLimitClass {
+        match self {
+            Self::Enroll => hecate_protocol::proxy::ProxyRateLimitClass::Enroll,
+            Self::Allowed => hecate_protocol::proxy::ProxyRateLimitClass::Allowed,
+            Self::Unrecognized => hecate_protocol::proxy::ProxyRateLimitClass::Unrecognized,
+        }
+    }
+}
+
+/// Classify method+path for rate limiting. Invalid paths count as unrecognized.
+pub fn rate_limit_class(method: &Method, path: &str) -> RateLimitClass {
+    let Ok(path) = canonicalize_agent_path(path) else {
+        return RateLimitClass::Unrecognized;
+    };
+    if !is_allowed_agent_route(method, &path) {
+        return RateLimitClass::Unrecognized;
+    }
+    if is_enroll_route(method, &path) {
+        RateLimitClass::Enroll
+    } else {
+        RateLimitClass::Allowed
+    }
+}
+
 pub fn is_release_artifact_route(method: &Method, path: &str) -> bool {
     method == Method::GET && is_release_artifact_path(path)
 }
@@ -181,6 +222,26 @@ mod tests {
             "/api/v1/agent/commands/x/../../../../../internal/commands/00000000-0000-0000-0000-000000000001/artifact"
         ));
         assert!(canonicalize_agent_path("/api/v1/agent/pull/%2e%2e/admin").is_err());
+    }
+
+    #[test]
+    fn rate_limit_class_covers_enroll_allowed_unrecognized() {
+        assert_eq!(
+            rate_limit_class(&Method::POST, "/api/v1/agent/enroll"),
+            RateLimitClass::Enroll
+        );
+        assert_eq!(
+            rate_limit_class(&Method::GET, "/api/v1/agent/pull"),
+            RateLimitClass::Allowed
+        );
+        assert_eq!(
+            rate_limit_class(&Method::GET, "/mcp"),
+            RateLimitClass::Unrecognized
+        );
+        assert_eq!(
+            rate_limit_class(&Method::GET, "/api/v1/agent/pull/%2e%2e/x"),
+            RateLimitClass::Unrecognized
+        );
     }
 
     #[test]

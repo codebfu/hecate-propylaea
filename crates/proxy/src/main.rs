@@ -136,14 +136,24 @@ async fn handle_request(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let path = match allowlist::canonicalize_agent_path(uri.path()) {
-        Ok(path) => path,
-        Err(()) => return (StatusCode::NOT_FOUND, "not found").into_response(),
-    };
+    let client_ip =
+        client_ip::resolve_client_ip(&addr, &headers, &state.config.trusted_proxy_cidrs);
+    let class = allowlist::rate_limit_class(&method, uri.path());
 
-    if !allowlist::is_allowed_agent_route(&method, &path) {
+    if class == allowlist::RateLimitClass::Unrecognized {
+        if !state.check_rate_limit(&client_ip, class) {
+            return (StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response();
+        }
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
+
+    let path = match allowlist::canonicalize_agent_path(uri.path()) {
+        Ok(path) => path,
+        Err(()) => {
+            // Should be unreachable: unrecognized already handled invalid paths.
+            return (StatusCode::NOT_FOUND, "not found").into_response();
+        }
+    };
 
     if !state.forwarding_enabled() {
         return (
@@ -153,9 +163,7 @@ async fn handle_request(
             .into_response();
     }
 
-    let client_ip =
-        client_ip::resolve_client_ip(&addr, &headers, &state.config.trusted_proxy_cidrs);
-    if !state.check_rate_limit(&client_ip, allowlist::is_enroll_route(&method, &path)) {
+    if !state.check_rate_limit(&client_ip, class) {
         return (StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response();
     }
 
