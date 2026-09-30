@@ -10,6 +10,7 @@ use hecate_protocol::proxy::{
 };
 use tracing::{info, warn};
 
+use crate::allowlist::RateLimitClass;
 use crate::crypto::{hmac_sha256_hex, ProxyKeypair};
 use crate::forward::log_ready;
 use crate::signing::signed_headers;
@@ -213,6 +214,18 @@ pub async fn run_once(state: Arc<AppState>) -> Result<()> {
             .insert(token.token_hmac.clone(), token);
     }
 
+    for unban in payload.rate_limit_unbans {
+        let class = match unban.class {
+            hecate_protocol::proxy::ProxyRateLimitClass::Enroll => RateLimitClass::Enroll,
+            hecate_protocol::proxy::ProxyRateLimitClass::Allowed => RateLimitClass::Allowed,
+            hecate_protocol::proxy::ProxyRateLimitClass::Unrecognized => {
+                RateLimitClass::Unrecognized
+            }
+        };
+        state.clear_rate_limit(&unban.ip, class);
+        info!(ip = %unban.ip, class = ?class, "applied rate-limit unban from Hecate");
+    }
+
     state.set_forwarding(true);
     log_ready(proxy_id);
     Ok(())
@@ -232,6 +245,7 @@ pub async fn heartbeat_once(state: Arc<AppState>) -> Result<()> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime_secs: state.started_at.elapsed().as_secs(),
         hostname,
+        rate_limits: state.list_limited_rate_limits(),
     };
     let body_bytes = serde_json::to_vec(&body)?;
     let keypair = state.keypair.read().await;

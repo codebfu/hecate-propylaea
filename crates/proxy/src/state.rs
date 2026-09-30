@@ -12,6 +12,7 @@ use hecate_protocol::proxy::ProxySyncEnrollmentToken;
 use reqwest::Client;
 use uuid::Uuid;
 
+use crate::allowlist::RateLimitClass;
 use crate::artifact_cache::ArtifactCache;
 use crate::config::Config;
 use crate::crypto::ProxyKeypair;
@@ -44,7 +45,26 @@ pub struct AppState {
 pub struct RateWindow {
     pub window_start: Instant,
     pub enroll_count: u32,
-    pub general_count: u32,
+    pub allowed_count: u32,
+    pub unrecognized_count: u32,
+}
+
+impl RateWindow {
+    fn count_mut(&mut self, class: RateLimitClass) -> &mut u32 {
+        match class {
+            RateLimitClass::Enroll => &mut self.enroll_count,
+            RateLimitClass::Allowed => &mut self.allowed_count,
+            RateLimitClass::Unrecognized => &mut self.unrecognized_count,
+        }
+    }
+
+    fn count(&self, class: RateLimitClass) -> u32 {
+        match class {
+            RateLimitClass::Enroll => self.enroll_count,
+            RateLimitClass::Allowed => self.allowed_count,
+            RateLimitClass::Unrecognized => self.unrecognized_count,
+        }
+    }
 }
 
 impl AppState {
@@ -174,10 +194,10 @@ impl AppState {
         );
     }
 
-    /// Rate-limit by client IP (from TCP peer or trusted `X-Forwarded-For`).
-    pub fn check_rate_limit(&self, client_ip: &str, enroll: bool) -> bool {
+    /// Rate-limit by client IP and class (from TCP peer or trusted `X-Forwarded-For`).
+    pub fn check_rate_limit(&self, client_ip: &str, class: RateLimitClass) -> bool {
         const MAX_RATE_ENTRIES: usize = 8192;
-        let limit = if enroll { 10 } else { 120 };
+        let limit = class.limit();
         let window = Duration::from_secs(60);
         let now = Instant::now();
         if self.rate_limits.len() >= MAX_RATE_ENTRIES {
@@ -193,20 +213,62 @@ impl AppState {
             .or_insert_with(|| RateWindow {
                 window_start: now,
                 enroll_count: 0,
-                general_count: 0,
+                allowed_count: 0,
+                unrecognized_count: 0,
             });
         if now.duration_since(entry.window_start) >= window {
             entry.window_start = now;
             entry.enroll_count = 0;
-            entry.general_count = 0;
+            entry.allowed_count = 0;
+            entry.unrecognized_count = 0;
         }
-        if enroll {
-            entry.enroll_count += 1;
-            entry.enroll_count <= limit
-        } else {
-            entry.general_count += 1;
-            entry.general_count <= limit
+        let count = entry.count_mut(class);
+        *count = count.saturating_add(1);
+        *count <= limit
+    }
+
+    /// Clear one class counter for an IP (operator unban).
+    pub fn clear_rate_limit(&self, client_ip: &str, class: RateLimitClass) {
+        if let Some(mut entry) = self.rate_limits.get_mut(client_ip) {
+            *entry.count_mut(class) = 0;
         }
+    }
+
+    /// Entries currently over their class limit (for heartbeat reporting).
+    pub fn list_limited_rate_limits(&self) -> Vec<hecate_protocol::proxy::ProxyRateLimitEntry> {
+        let window = Duration::from_secs(60);
+        let now = Instant::now();
+        let started_at = chrono::Utc::now();
+        let mut out = Vec::new();
+        for item in self.rate_limits.iter() {
+            let ip = item.key();
+            let entry = item.value();
+            if now.duration_since(entry.window_start) >= window {
+                continue;
+            }
+            let elapsed = now.duration_since(entry.window_start);
+            let window_started_at = (started_at
+                - chrono::Duration::from_std(elapsed).unwrap_or_default())
+            .to_rfc3339();
+            for class in [
+                RateLimitClass::Enroll,
+                RateLimitClass::Allowed,
+                RateLimitClass::Unrecognized,
+            ] {
+                let count = entry.count(class);
+                let limit = class.limit();
+                if count > limit {
+                    out.push(hecate_protocol::proxy::ProxyRateLimitEntry {
+                        ip: ip.clone(),
+                        class: class.as_protocol(),
+                        count,
+                        limit,
+                        window_started_at: window_started_at.clone(),
+                    });
+                }
+            }
+        }
+        out
     }
 }
 
@@ -245,16 +307,17 @@ mod tests {
     }
 
     #[test]
-    fn enroll_and_general_limits_are_independent() {
+    fn enroll_and_allowed_limits_are_independent() {
         let state = test_state();
         let client = "203.0.113.10";
 
         for _ in 0..120 {
-            assert!(state.check_rate_limit(client, false));
+            assert!(state.check_rate_limit(client, RateLimitClass::Allowed));
         }
-        assert!(!state.check_rate_limit(client, false));
+        assert!(!state.check_rate_limit(client, RateLimitClass::Allowed));
 
-        assert!(state.check_rate_limit(client, true));
+        assert!(state.check_rate_limit(client, RateLimitClass::Enroll));
+        assert!(state.check_rate_limit(client, RateLimitClass::Unrecognized));
     }
 
     #[test]
@@ -263,9 +326,24 @@ mod tests {
         let client = "198.51.100.4";
 
         for _ in 0..10 {
-            assert!(state.check_rate_limit(client, true));
+            assert!(state.check_rate_limit(client, RateLimitClass::Enroll));
         }
-        assert!(!state.check_rate_limit(client, true));
-        assert!(state.check_rate_limit(client, false));
+        assert!(!state.check_rate_limit(client, RateLimitClass::Enroll));
+        assert!(state.check_rate_limit(client, RateLimitClass::Allowed));
+    }
+
+    #[test]
+    fn unrecognized_limit_and_unban() {
+        let state = test_state();
+        let client = "198.51.100.20";
+
+        for _ in 0..30 {
+            assert!(state.check_rate_limit(client, RateLimitClass::Unrecognized));
+        }
+        assert!(!state.check_rate_limit(client, RateLimitClass::Unrecognized));
+        assert_eq!(state.list_limited_rate_limits().len(), 1);
+
+        state.clear_rate_limit(client, RateLimitClass::Unrecognized);
+        assert!(state.check_rate_limit(client, RateLimitClass::Unrecognized));
     }
 }
