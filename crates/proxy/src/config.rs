@@ -107,6 +107,8 @@ pub struct Config {
     pub key_path: PathBuf,
     pub proxy_id_path: PathBuf,
     pub enrollment_token: Option<String>,
+    /// When true with a token, force credential rotation even if existing credentials still sync.
+    pub force_reenroll: bool,
     /// Hostname reported to Hecate (enroll/heartbeat). Prefer the host OS name over the container id.
     pub reported_hostname: String,
     pub sync_interval_secs: u64,
@@ -155,6 +157,9 @@ impl Config {
                     .unwrap_or_else(|_| "/var/lib/hecate-propylaea/proxy_id".into()),
             ),
             enrollment_token: env::var("PROXY_ENROLLMENT_TOKEN").ok().filter(|s| !s.is_empty()),
+            force_reenroll: env::var("PROXY_FORCE_REENROLL")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
             reported_hostname: resolve_reported_hostname(),
             sync_interval_secs: env::var("SYNC_INTERVAL_SECS")
                 .ok()

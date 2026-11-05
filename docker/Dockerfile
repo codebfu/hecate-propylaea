@@ -38,7 +38,7 @@ RUN sed -i "s/^version = \".*\"/version = \"${PROPYLAEA_VERSION}\"/" Cargo.toml 
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -g 1000 propylaea \
     && useradd -u 1000 -g propylaea -m -s /usr/sbin/nologin propylaea \

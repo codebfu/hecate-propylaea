@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.1.1 — 2026-11-05
+
+### Fixed
+
+- Ignore a leftover `PROXY_ENROLLMENT_TOKEN` when existing proxy credentials still sync successfully.
+- Persist a rotated `proxy.key` only after Hecate accepts re-enrollment (rejected tokens no longer orphan working credentials).
+- Add `PROXY_FORCE_REENROLL=1` to force credential rotation when existing credentials are still valid.
+
+### Changed
+
+- Docker image installs `curl` and compose healthchecks for Propylaea/Caddy; Caddy exposes `/caddy-healthz`.
+
+## 1.1.0 — 2026-09-30
+
 ### Added
 
 - Three independent per-IP rate-limit quotas: enroll (10/min), allowed (120/min), unrecognized (30/min).

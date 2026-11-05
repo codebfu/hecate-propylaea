@@ -289,6 +289,7 @@ mod tests {
             key_path,
             proxy_id_path,
             enrollment_token: None,
+            force_reenroll: false,
             reported_hostname: "test".into(),
             sync_interval_secs: 30,
             heartbeat_interval_secs: 60,

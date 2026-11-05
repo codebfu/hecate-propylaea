@@ -19,21 +19,55 @@ use crate::state::{AppState, CachedAgent};
 pub async fn bootstrap(state: Arc<AppState>) -> Result<()> {
     if state.proxy_id().await.is_none() {
         enroll_if_needed(&state).await?;
-    } else if state.config.enrollment_token.is_some() {
-        match reenroll_if_needed(&state).await {
-            Ok(()) => {}
-            Err(error) if should_reset_identity_for_enroll(&error) => {
-                warn!(
-                    %error,
-                    "resetting stale proxy identity for fresh enrollment token"
-                );
-                state.clear_proxy_identity().await?;
-                enroll_if_needed(&state).await?;
-            }
-            Err(error) => return Err(error),
-        }
+        return run_once(state).await;
     }
-    run_once(state).await
+
+    let has_token = state.config.enrollment_token.is_some();
+    if state.config.force_reenroll {
+        if !has_token {
+            bail!("PROXY_FORCE_REENROLL requires PROXY_ENROLLMENT_TOKEN");
+        }
+        try_reenroll(&state).await?;
+        return run_once(state).await;
+    }
+
+    // Prefer existing credentials whenever they still authenticate.
+    // A leftover PROXY_ENROLLMENT_TOKEN must not rotate a working keypair.
+    match run_once(Arc::clone(&state)).await {
+        Ok(()) => {
+            if has_token {
+                warn!(
+                    "ignoring PROXY_ENROLLMENT_TOKEN; existing proxy credentials synced successfully"
+                );
+            }
+            Ok(())
+        }
+        Err(error) if has_token && is_unauthorized_sync(&error) => {
+            warn!(
+                %error,
+                "existing proxy credentials rejected; attempting re-enrollment with PROXY_ENROLLMENT_TOKEN"
+            );
+            try_reenroll(&state).await?;
+            run_once(state).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn try_reenroll(state: &AppState) -> Result<()> {
+    match reenroll_if_needed(state).await {
+        Ok(()) => Ok(()),
+        Err(error) if should_reset_identity_for_enroll(&error) => {
+            warn!(
+                %error,
+                "resetting stale proxy identity for fresh enrollment token"
+            );
+            state.clear_proxy_identity().await?;
+            enroll_if_needed(state).await?;
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn should_reset_identity_for_enroll(error: &anyhow::Error) -> bool {
@@ -42,6 +76,12 @@ fn should_reset_identity_for_enroll(error: &anyhow::Error) -> bool {
         || msg.contains("proxy enroll failed: 400 ")
         || msg.contains("proxy enroll failed: 404 ")
         || msg.contains("proxy enroll failed: 401 ")
+        || msg.contains("proxy re-enroll token rejected")
+}
+
+fn is_unauthorized_sync(error: &anyhow::Error) -> bool {
+    let msg = format!("{error:#}");
+    msg.contains("proxy sync failed: 401 ")
 }
 
 async fn enroll_if_needed(state: &AppState) -> Result<()> {
@@ -83,24 +123,25 @@ async fn reenroll_if_needed(state: &AppState) -> Result<()> {
         }
     }
 
-    let new_keypair = ProxyKeypair::regenerate_at(&state.config.key_path)?;
-    state.replace_keypair(new_keypair).await;
-
-    let keypair = state.keypair.read().await;
+    // Generate the new keypair in memory first. Persist only after Hecate accepts it,
+    // otherwise a rejected leftover token would orphan the previous working credentials.
+    let new_keypair = ProxyKeypair::generate();
     let body = ProxyEnrollRequest {
         enrollment_token: token,
         proxy_id: Some(proxy_id),
-        public_key: keypair.public_key_b64(),
+        public_key: new_keypair.public_key_b64(),
         hostname: state.config.reported_hostname.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         attestation: serde_json::json!({}),
     };
-    drop(keypair);
 
     let response = post_proxy_enroll(state, body).await?;
     if response.proxy_id != proxy_id {
         bail!("proxy re-enroll returned a different proxy_id");
     }
+
+    new_keypair.persist_at(&state.config.key_path)?;
+    state.replace_keypair(new_keypair).await;
     info!(proxy_id = %proxy_id, "proxy re-enrolled with Hecate");
     Ok(())
 }
@@ -122,11 +163,7 @@ async fn post_proxy_enroll(
         .context("proxy enroll request")?;
 
     if response.status().as_u16() == 401 && body.proxy_id.is_some() {
-        warn!("proxy re-enroll token rejected; continuing with existing credentials");
-        return Ok(ProxyEnrollResponse {
-            proxy_id: body.proxy_id.unwrap(),
-            state: ProxyState::Active,
-        });
+        bail!("proxy re-enroll token rejected");
     }
 
     if !response.status().is_success() {
@@ -279,4 +316,26 @@ pub async fn heartbeat_once(state: Arc<AppState>) -> Result<()> {
         bail!("proxy heartbeat failed: {status} {text}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_unauthorized_sync() {
+        let err = anyhow::anyhow!(
+            "proxy sync failed: 401 Unauthorized {{\"error\":\"unauthorized\"}}"
+        );
+        assert!(is_unauthorized_sync(&err));
+        assert!(!is_unauthorized_sync(&anyhow::anyhow!(
+            "proxy sync failed: 500 boom"
+        )));
+    }
+
+    #[test]
+    fn rejected_reenroll_token_triggers_identity_reset_path() {
+        let err = anyhow::anyhow!("proxy re-enroll token rejected");
+        assert!(should_reset_identity_for_enroll(&err));
+    }
 }

@@ -24,13 +24,22 @@ services:
       - /etc/hostname:/etc/host_hostname:ro
     networks:
       - frontend
+    labels:
+      - autoheal=true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
     restart: unless-stopped
 
   caddy:
     image: caddy:2-alpine
     profiles: ["proxy"]
     depends_on:
-      - propylaea
+      propylaea:
+        condition: service_healthy
     ports:
       - "${PROPYLAEA_HTTPS_PORT:-18443}:443"
     volumes:
@@ -38,7 +47,31 @@ services:
       - ${PROPYLAEA_TLS_DIR:-./tls}:/etc/caddy/tls:ro
     networks:
       - frontend
+    labels:
+      - autoheal=true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--spider",
+          "-q",
+          "--no-check-certificate",
+          "https://127.0.0.1/caddy-healthz",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
     restart: unless-stopped
+
+  autoheal:
+    image: willfarrell/autoheal:1.2.0
+    restart: unless-stopped
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
 networks:
   frontend:

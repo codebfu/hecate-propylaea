@@ -99,38 +99,42 @@ impl ProxyKeypair {
     }
 
     pub fn regenerate_at(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
         let kp = Self::generate();
+        kp.persist_at(path)?;
+        Ok(kp)
+    }
+
+    /// Persist this keypair seed to disk (overwrites). Call only after upstream accepts the pubkey.
+    pub fn persist_at(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        use std::io::Write;
+        #[cfg(unix)]
         {
-            use std::io::Write;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                let mut file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .mode(0o600)
-                    .custom_flags(libc::O_NOFOLLOW)
-                    .open(path)?;
-                file.write_all(&kp.signing_key.to_bytes())?;
-                file.sync_all()?;
-            }
-            #[cfg(not(unix))]
-            {
-                let mut file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .open(path)?;
-                file.write_all(&kp.signing_key.to_bytes())?;
-                file.sync_all()?;
-            }
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(path)?;
+            file.write_all(&self.signing_key.to_bytes())?;
+            file.sync_all()?;
         }
-        Ok(kp)
+        #[cfg(not(unix))]
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(path)?;
+            file.write_all(&self.signing_key.to_bytes())?;
+            file.sync_all()?;
+        }
+        Ok(())
     }
 
     pub fn public_key_b64(&self) -> String {
